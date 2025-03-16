@@ -1,9 +1,11 @@
-name: Deploy Streamlit App
+name: Update and Deploy Data
 
 on:
   push:
     branches:
       - main
+  schedule:
+    - cron: "0 0 * * *"
 
 jobs:
   deploy:
@@ -39,4 +41,4 @@ jobs:
           git diff --cached --exit-code || (git commit -m "Update data.parquet" && git push)
       
       - name: Final Step
-        run: echo "Ready for Streamlit Community Cloud deployment
+        run: echo "Ready for Streamlit Community Cloud deployment"
