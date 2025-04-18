@@ -85,8 +85,6 @@ metrics = (
 latam_row = metrics.filter(pl.col("region").str.to_lowercase() == "latino")
 latam_val = latam_row["Valor"][0] if latam_row.height > 0 else metrics["Valor"].mean()
 
-
-
 metrics = metrics.with_columns(
     ((pl.col("Valor") - pl.lit(latam_val)) * 1e2).alias("Spread vs LatAm")
 )
@@ -116,7 +114,7 @@ start_date, end_date = st.sidebar.slider(
 table = metrics.filter(pl.col("region").is_in(sel_regions))
 
 st.title("EMBI Report")
-st.subheader("Resumen – último cierre")
+st.subheader("Summary")
 st.dataframe(
     table.to_pandas(),
     column_config={
@@ -145,15 +143,25 @@ series = (
       .collect()
 )
 
-st.altair_chart(
-    alt.Chart(series.to_pandas()).mark_line().encode(
-        x="date:T",
-        y="value:Q",
-        color="region:N",
-        tooltip=["region", "date", "value"],
-    ),
-    use_container_width=True,
+# ---------- RAW SERIES ----------
+line_chart = (
+    alt.Chart(series.to_pandas())
+        # make the line thicker → easier hover/click
+        .mark_line(strokeWidth=3)               # :contentReference[oaicite:0]{index=0}
+        .encode(
+            x="date:T",
+            y="value:Q",
+            color="region:N",
+            tooltip=[
+                alt.Tooltip("date:T",    title="Fecha"),
+                alt.Tooltip("region:N",  title="Región"),
+                alt.Tooltip("value:Q",   title="Valor"),
+            ],                              # full tooltip per point :contentReference[oaicite:1]{index=1}
+        )
+        .interactive()                       # pan/zoom still works :contentReference[oaicite:2]{index=2}
 )
+
+st.altair_chart(line_chart, use_container_width=True)
 
 roll = (
     series.with_columns(
@@ -162,14 +170,23 @@ roll = (
     .select(["date", "region", "rolling50"])
 )
 
-st.altair_chart(
-    alt.Chart(roll.to_pandas()).mark_line().encode(
-        x="date:T",
-        y="rolling50:Q",
-        color="region:N",
-        tooltip=["region", "date", "rolling50"],
-    ),
-    use_container_width=True,
+# ---------- 50‑DAY ROLLING MEAN ----------
+roll_chart = (
+    alt.Chart(roll.to_pandas())
+        .mark_line(strokeWidth=3)               # same thicker line
+        .encode(
+            x="date:T",
+            y="rolling50:Q",
+            color="region:N",
+            tooltip=[
+                alt.Tooltip("date:T",        title="Fecha"),
+                alt.Tooltip("region:N",      title="Región"),
+                alt.Tooltip("rolling50:Q",   title="Media 50 d"),
+            ],
+        )
+        .interactive()
 )
+
+st.altair_chart(roll_chart, use_container_width=True)
 
 st.caption("Fuente: Emerging Market Bond Index")
