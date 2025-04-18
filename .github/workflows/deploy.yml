@@ -1,5 +1,9 @@
 name: Update and Deploy Data
 
+# grant write access so the bot can push
+permissions:
+  contents: write
+
 on:
   push:
     branches:
@@ -10,35 +14,42 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v3
+        with:
+          # ensure the GITHUB_TOKEN is available for push
+          persist-credentials: true
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set Up Python
         uses: actions/setup-python@v4
         with:
           python-version: "3.12.3"
-      
+
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-      
+
       - name: Run Data Fetch Script
-        run: |
-          python fetch_data.py
+        run: python fetch_data.py
 
       - name: Verify Updated Data
         run: |
-          python -c "import polars as pl; df = pl.read_parquet('data.parquet'); print('Updated data.parquet shape:', df.shape); print(df.head())"
-      
+          python -c "
+          import polars as pl
+          df = pl.read_parquet('data.parquet')
+          print('shape:', df.shape)
+          print(df.head())
+          "
       - name: Commit Updated data.parquet
         run: |
           git config user.name "oeam96"
           git config user.email "${{ secrets.EMAIL }}"
           git add data.parquet
-          # If there are changes, commit and push
           git diff --cached --exit-code || (git commit -m "Update data.parquet" && git push)
-      
+
       - name: Final Step
         run: echo "Ready for Streamlit Community Cloud deployment"
