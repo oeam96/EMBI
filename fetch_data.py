@@ -90,3 +90,4 @@ print(df.head)
 
 # Save as Parquet file
 df.write_parquet("data.parquet")
+df.write_csv("data.csv")

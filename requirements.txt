@@ -3,3 +3,4 @@ requests
 streamlit
 pyarrow
 polars[excel]
+altair
