@@ -1,93 +1,102 @@
-import polars as pl
-import requests
-import io
 import datetime as dt
+import io
 from functools import reduce
 
-def parse_mixed_date(date_str: str) -> str | None:
-    """
-    Attempt multiple date patterns and return a unified YYYY-MM-DD string.
-    Returns None if none match.
-    """
-    patterns = ("%Y-%m-%d", "%d-%b-%y", "%d-%b-%Y")
-    for fmt in patterns:
-        try:
-            # Convert to a datetime, then back to ISO string for consistent parsing
-            dt_obj = dt.datetime.strptime(date_str, fmt)
-            return dt_obj.strftime("%Y-%m-%d")
-        except ValueError:
-            pass
-    return None
+import polars as pl
+import requests
 
 
-# URL to download EMBI file
-url = "https://bcrdgdcprod.blob.core.windows.net/documents/entorno-internacional/documents/Serie_Historica_Spread_del_EMBI.xlsx"
+SOURCE_URL = "https://bcrdgdcprod.blob.core.windows.net/documents/entorno-internacional/documents/Serie_Historica_Spread_del_EMBI.xlsx"
+SHEET_NAME = "Serie Histórica"
+OUTPUT_PATH = "data.parquet"
+EXPECTED_DATE_COLUMN = "Fecha"
 
-# Download the file content
-response = requests.get(url)
-response.raise_for_status()
 
-# Read the Excel content into Polars DataFrame
-df = pl.read_excel(io.BytesIO(response.content),
-                   sheet_name="Serie Histórica",
-                   columns=[i for i in range(0,20)])
+def parse_mixed_date(value: object) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, (dt.datetime, dt.date)):
+        return value.strftime("%Y-%m-%d")
 
-# Using first row as header
-header = df.row(0)
-header = list(header)
-df.columns= header
-
-# Removing the first row
-df = df.filter(~pl.Series(range(len(df))).is_in([0]))
-
-# Define a custom parser function that tries multiple formats.
-def parse_mixed_date(s: str) -> str | None:
-    patterns = [
-        "%Y-%m-%d %H:%M:%S",  # e.g., "2025-03-13 00:00:00"
-        "%Y-%m-%d",           # e.g., "2025-03-13"
-        "%d-%b-%y",           # e.g., "20-Jan-24"
+    text = str(value).strip()
+    patterns = (
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d",
+        "%d-%b-%y",
         "'%d-%b-%y",
-        "%d-%b-%Y",           # e.g., "20-Jan-2024"
-    ]
-    for fmt in patterns:
+        "%d-%b-%Y",
+    )
+    for pattern in patterns:
         try:
-            dt_obj = dt.datetime.strptime(s, fmt)
-            return dt_obj.strftime("%Y-%m-%d")
+            return dt.datetime.strptime(text, pattern).strftime("%Y-%m-%d")
         except ValueError:
             continue
     return None
 
-df = df.with_columns(
-    pl.col("Fecha")
-      .map_elements(parse_mixed_date, return_dtype=pl.Utf8)
-      .str.strptime(pl.Date, format="%Y-%m-%d", strict=False)
-      .alias("Fecha_parsed")
-)
 
-# Drop the original "Fecha" column and rename "Fecha_parsed" to "Fecha"
-df = df.drop("Fecha").rename({"Fecha_parsed": "Date"})
+def download_source() -> bytes:
+    response = requests.get(SOURCE_URL, timeout=30)
+    response.raise_for_status()
+    return response.content
 
-# Reorder columns so that "Fecha" is the first column.
-cols = df.columns
-new_order = ["Date"] + [col for col in cols if col != "Date"]
-df = df.select(new_order)
 
-# --- Filter out rows where any column contains "`" or "N/A" ---
-# For each column, cast to Utf8 and check that it does not contain either unwanted value.
-conditions = [
-    ~pl.col(col).cast(pl.Utf8).str.contains("`") & ~pl.col(col).cast(pl.Utf8).str.contains("N/A")
-    for col in df.columns
-]
-# Combine all conditions with logical AND.
-filter_condition = reduce(lambda acc, expr: acc & expr, conditions)
-df = df.filter(filter_condition)
+def read_source_excel(content: bytes) -> pl.DataFrame:
+    raw = pl.read_excel(
+        io.BytesIO(content),
+        sheet_name=SHEET_NAME,
+        columns=list(range(20)),
+    )
+    if raw.height < 2:
+        raise ValueError("Source workbook does not contain enough rows.")
 
-# Convert all other columns except "Fecha" to Float64.
-other_cols = [col for col in df.columns if col != "Date"]
-df = df.with_columns([pl.col(c).cast(pl.Float64) for c in other_cols])
+    header = [str(col).strip() for col in raw.row(0)]
+    raw.columns = header
+    return raw.slice(1)
 
-print(df.head)
 
-# Save as Parquet file
-df.write_parquet("data.parquet")
-df.write_csv("data.csv")
+def clean_embi_data(df: pl.DataFrame) -> pl.DataFrame:
+    if EXPECTED_DATE_COLUMN not in df.columns:
+        raise ValueError(f"Source workbook is missing the expected '{EXPECTED_DATE_COLUMN}' column.")
+
+    df = df.with_columns(
+        pl.col(EXPECTED_DATE_COLUMN)
+        .map_elements(parse_mixed_date, return_dtype=pl.Utf8)
+        .str.strptime(pl.Date, format="%Y-%m-%d", strict=False)
+        .alias("Date")
+    ).drop(EXPECTED_DATE_COLUMN)
+
+    value_columns = [col for col in df.columns if col != "Date"]
+    if not value_columns:
+        raise ValueError("Source workbook has no EMBI spread columns.")
+
+    invalid_tokens = ["`", "N/A"]
+    valid_conditions = [pl.col("Date").is_not_null()]
+    for col in value_columns:
+        as_text = pl.col(col).cast(pl.Utf8).str.strip_chars()
+        valid_conditions.extend(~as_text.str.contains(token, literal=True) for token in invalid_tokens)
+        valid_conditions.append(as_text != "")
+
+    df = df.filter(reduce(lambda acc, expr: acc & expr, valid_conditions))
+    df = df.with_columns([pl.col(col).cast(pl.Float64, strict=False) for col in value_columns])
+    df = df.drop_nulls(["Date", *value_columns])
+
+    return (
+        df.select(["Date", *value_columns])
+        .unique(subset=["Date"], keep="last")
+        .sort("Date")
+    )
+
+
+def main() -> None:
+    content = download_source()
+    df = clean_embi_data(read_source_excel(content))
+    if df.height == 0:
+        raise ValueError("Cleaned EMBI dataset is empty.")
+
+    df.write_parquet(OUTPUT_PATH)
+    print(f"Wrote {OUTPUT_PATH}: {df.height} rows, {len(df.columns) - 1} series.")
+    print(f"Latest observation: {df.select(pl.col('Date').max()).item()}")
+
+
+if __name__ == "__main__":
+    main()
